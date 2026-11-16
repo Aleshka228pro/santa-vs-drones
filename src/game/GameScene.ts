@@ -9,12 +9,13 @@ const GIFT_SPEED = 560;
 const MAX_HEALTH = 5;
 const HIT_COOLDOWN_MS = 1000;
 const COINS_PER_UPGRADE = 5;
-const START_FIRE_DELAY_MS = 1100;
-const MIN_FIRE_DELAY_MS = 260;
-const FIRE_DELAY_STEP_MS = 150;
+const GIFT_LAUNCHER_BASE_DELAY_MS = 1100;
+const GIFT_LAUNCHER_RATE_PER_LEVEL = 1.05;
+const GIFT_LAUNCHER_MAX_LEVEL = 10;
 const GIFT_LIFETIME_MS = 1800;
 const KILL_POINTS = 10;
 const TIME_POINTS_PER_SECOND = 1;
+const HUD_HEIGHT = 96;
 
 type Drone = { view: Phaser.GameObjects.Container; speed: number };
 type Gift = { view: Phaser.GameObjects.Arc; vx: number; vy: number; remainingMs: number };
@@ -29,6 +30,12 @@ export class GameScene extends Phaser.Scene {
   private timerText!: Phaser.GameObjects.Text;
   private coinsText!: Phaser.GameObjects.Text;
   private levelText!: Phaser.GameObjects.Text;
+  private hudBackground!: Phaser.GameObjects.Rectangle;
+  private hudDivider!: Phaser.GameObjects.Rectangle;
+  private titleText!: Phaser.GameObjects.Text;
+  private hintText!: Phaser.GameObjects.Text;
+  private overlayBackdrop?: Phaser.GameObjects.Rectangle;
+  private activeOverlay?: Phaser.GameObjects.Container;
   private upgradeMenu?: Phaser.GameObjects.Container;
   private drones: Drone[] = [];
   private gifts: Gift[] = [];
@@ -37,6 +44,7 @@ export class GameScene extends Phaser.Scene {
   private score = 0;
   private totalCoins = 0;
   private level = 1;
+  private giftLauncherLevel = 1;
   private nextUpgradeAt = COINS_PER_UPGRADE;
   private survivedMs = 0;
   private spawnTimer = 0;
@@ -54,6 +62,7 @@ export class GameScene extends Phaser.Scene {
     this.score = 0;
     this.totalCoins = 0;
     this.level = 1;
+    this.giftLauncherLevel = 1;
     this.nextUpgradeAt = COINS_PER_UPGRADE;
     this.survivedMs = 0;
     this.spawnTimer = 700;
@@ -62,6 +71,8 @@ export class GameScene extends Phaser.Scene {
     this.gameOver = false;
     this.upgradeOpen = false;
     this.upgradeMenu = undefined;
+    this.activeOverlay = undefined;
+    this.overlayBackdrop = undefined;
     this.drones = [];
     this.gifts = [];
     this.coins = [];
@@ -71,6 +82,10 @@ export class GameScene extends Phaser.Scene {
     this.cameras.main.setBounds(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
     this.cameras.main.centerOn(this.player.x, this.player.y);
     this.cameras.main.startFollow(this.player, true, 0.12, 0.12);
+    this.scale.on(Phaser.Scale.Events.RESIZE, this.layoutHud, this);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.scale.off(Phaser.Scale.Events.RESIZE, this.layoutHud, this);
+    });
 
     if (!this.input.keyboard) throw new Error('Keyboard input is unavailable.');
     const keys = this.input.keyboard.addKeys({
@@ -104,7 +119,7 @@ export class GameScene extends Phaser.Scene {
     this.fireTimer -= step;
     if (this.fireTimer <= 0 && this.drones.length > 0) {
       this.fireGift();
-      this.fireTimer = Math.max(MIN_FIRE_DELAY_MS, START_FIRE_DELAY_MS - (this.level - 1) * FIRE_DELAY_STEP_MS);
+      this.fireTimer = this.giftLauncherDelayMs();
     }
     this.moveDrones(step / 1000);
     this.moveGifts(step);
@@ -140,20 +155,39 @@ export class GameScene extends Phaser.Scene {
 
   private createHud(): void {
     const style = { fontFamily: 'Arial, sans-serif', fontSize: '21px', color: '#f7fbff' };
-    this.add.rectangle(this.scale.width / 2, 48, this.scale.width, 96, 0x071626, 0.94).setScrollFactor(0).setDepth(10);
-    this.add.rectangle(this.scale.width / 2, 96, this.scale.width, 2, 0x4d8198, 0.6).setScrollFactor(0).setDepth(10);
-    this.add.text(18, 12, 'ДЕД МОРОЗ ПРОТИВ ДРОНОВ', {
+    this.hudBackground = this.add.rectangle(0, 0, 1, HUD_HEIGHT, 0x071626, 0.82).setScrollFactor(0).setDepth(10);
+    this.hudDivider = this.add.rectangle(0, HUD_HEIGHT, 1, 2, 0x4d8198, 0.6).setScrollFactor(0).setDepth(10);
+    this.titleText = this.add.text(18, 12, 'ДЕД МОРОЗ ПРОТИВ ДРОНОВ', {
       ...style, fontSize: '24px', fontStyle: 'bold', color: '#f7df9c',
     }).setScrollFactor(0).setDepth(11);
-    this.add.text(18, 53, 'WASD — летать  •  подарки летят автоматически  •  собирай монеты', {
+    this.hintText = this.add.text(18, 53, 'WASD — летать  •  подарки летят автоматически  •  собирай монеты', {
       ...style, fontSize: '16px', color: '#b6cadc',
     }).setScrollFactor(0).setDepth(11);
-    this.healthText = this.add.text(750, 10, '', style).setScrollFactor(0).setDepth(11);
-    this.scoreText = this.add.text(750, 39, '', style).setScrollFactor(0).setDepth(11);
-    this.timerText = this.add.text(750, 68, '', { ...style, fontSize: '18px' }).setScrollFactor(0).setDepth(11);
-    this.coinsText = this.add.text(18, this.scale.height - 35, '', style).setScrollFactor(0).setDepth(11);
-    this.levelText = this.add.text(790, this.scale.height - 35, '', style).setScrollFactor(0).setDepth(11);
+    this.healthText = this.add.text(0, 10, '', style).setOrigin(1, 0).setScrollFactor(0).setDepth(11);
+    this.scoreText = this.add.text(0, 39, '', style).setOrigin(1, 0).setScrollFactor(0).setDepth(11);
+    this.timerText = this.add.text(0, 68, '', { ...style, fontSize: '18px' }).setOrigin(1, 0).setScrollFactor(0).setDepth(11);
+    this.coinsText = this.add.text(18, 0, '', style).setScrollFactor(0).setDepth(11);
+    this.levelText = this.add.text(0, 0, '', style).setOrigin(1, 0).setScrollFactor(0).setDepth(11);
+    this.layoutHud();
     this.refreshHud();
+  }
+
+  private layoutHud(): void {
+    const { width, height } = this.scale;
+    const narrow = width < 800;
+    this.hudBackground.setPosition(width / 2, HUD_HEIGHT / 2).setSize(width, HUD_HEIGHT);
+    this.hudDivider.setPosition(width / 2, HUD_HEIGHT).setSize(width, 2);
+    this.titleText.setFontSize(narrow ? 18 : 24);
+    this.hintText.setFontSize(narrow ? 13 : 16);
+    this.hintText.setText(narrow ? 'WASD • автострельба • монеты' :
+      'WASD — летать  •  подарки летят автоматически  •  собирай монеты');
+    this.healthText.setPosition(width - 18, 10).setFontSize(narrow ? 16 : 21);
+    this.scoreText.setPosition(width - 18, 39).setFontSize(narrow ? 16 : 21);
+    this.timerText.setPosition(width - 18, 68).setFontSize(narrow ? 15 : 18);
+    this.coinsText.setPosition(18, height - 35).setFontSize(narrow ? 16 : 21);
+    this.levelText.setPosition(width - 18, height - 35).setFontSize(narrow ? 16 : 21);
+    this.activeOverlay?.setPosition(width / 2, height / 2);
+    this.overlayBackdrop?.setSize(width, height);
   }
 
   private refreshHud(): void {
@@ -170,6 +204,11 @@ export class GameScene extends Phaser.Scene {
     return `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')}`;
   }
 
+  private giftLauncherDelayMs(): number {
+    return GIFT_LAUNCHER_BASE_DELAY_MS /
+      GIFT_LAUNCHER_RATE_PER_LEVEL ** (this.giftLauncherLevel - 1);
+  }
+
   private movePlayer(seconds: number): void {
     let dx = Number(this.wasd.right.isDown) - Number(this.wasd.left.isDown);
     let dy = Number(this.wasd.down.isDown) - Number(this.wasd.up.isDown);
@@ -181,7 +220,7 @@ export class GameScene extends Phaser.Scene {
       this.player.y += dy * PLAYER_SPEED * seconds;
     }
     this.player.x = Phaser.Math.Clamp(this.player.x, 30, WORLD_WIDTH - 30);
-    this.player.y = Phaser.Math.Clamp(this.player.y, 125, WORLD_HEIGHT - 55);
+    this.player.y = Phaser.Math.Clamp(this.player.y, 40, WORLD_HEIGHT - 30);
   }
 
   private spawnDrone(): void {
@@ -279,7 +318,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   private dropCoin(x: number, y: number): void {
-    const view = this.add.circle(x, y, 9, 0xffcf52);
+    const visibleTop = this.cameras.main.worldView.top + HUD_HEIGHT + 16;
+    const coinY = Phaser.Math.Clamp(Math.max(y, visibleTop), 24, WORLD_HEIGHT - 24);
+    const view = this.add.circle(x, coinY, 9, 0xffcf52);
     view.setStrokeStyle(2, 0xffedac);
     this.coins.push({ view });
   }
@@ -294,8 +335,12 @@ export class GameScene extends Phaser.Scene {
       this.refreshHud();
       if (this.totalCoins >= this.nextUpgradeAt) {
         this.nextUpgradeAt += COINS_PER_UPGRADE;
-        this.showUpgradeMenu();
-        break;
+        this.level++;
+        this.refreshHud();
+        if (this.giftLauncherLevel < GIFT_LAUNCHER_MAX_LEVEL) {
+          this.showUpgradeMenu();
+          break;
+        }
       }
     }
   }
@@ -307,33 +352,38 @@ export class GameScene extends Phaser.Scene {
     menu.add([
       this.add.rectangle(0, 0, width, height, 0x06101c, 0.78),
       this.add.rectangle(0, 0, 510, 290, 0x142c47).setStrokeStyle(3, 0xf8df9f),
-      this.add.text(0, -103, `УРОВЕНЬ ${this.level + 1}`, {
+      this.add.text(0, -103, `УРОВЕНЬ ${this.level}`, {
         fontFamily: 'Arial, sans-serif', fontSize: '31px', color: '#f8df9f', fontStyle: 'bold',
       }).setOrigin(0.5),
       this.add.text(0, -53, 'Выбери улучшение', {
         fontFamily: 'Arial, sans-serif', fontSize: '19px', color: '#d4e3ee',
       }).setOrigin(0.5),
     ]);
-    const choice = this.add.text(0, 20, '1  •  Скорострельность +1', {
+    const choice = this.add.text(0, 20,
+      `1  •  Подаркомёт: скорострельность +5%\n     Уровень ${this.giftLauncherLevel} → ${this.giftLauncherLevel + 1}/${GIFT_LAUNCHER_MAX_LEVEL}`, {
       fontFamily: 'Arial, sans-serif', fontSize: '23px', color: '#10233d',
       backgroundColor: '#f8df9f', padding: { x: 28, y: 16 },
-    }).setOrigin(0.5).setInteractive({ useHandCursor: true });
+    }).setOrigin(0.5).setAlign('center').setInteractive({ useHandCursor: true });
     choice.on('pointerdown', () => this.chooseFireRateUpgrade());
     menu.add(choice);
     menu.add(this.add.text(0, 101, 'Нажми 1 или выбери мышью', {
       fontFamily: 'Arial, sans-serif', fontSize: '17px', color: '#b6cadc',
     }).setOrigin(0.5));
     this.upgradeMenu = menu;
+    this.activeOverlay = menu;
+    this.overlayBackdrop = menu.getAt(0) as Phaser.GameObjects.Rectangle;
   }
 
   private chooseFireRateUpgrade(): void {
     if (!this.upgradeOpen) return;
-    this.level++;
+    if (this.giftLauncherLevel >= GIFT_LAUNCHER_MAX_LEVEL) return;
+    this.giftLauncherLevel++;
     this.upgradeOpen = false;
     this.upgradeMenu?.destroy();
     this.upgradeMenu = undefined;
-    this.fireTimer = Math.min(this.fireTimer,
-      Math.max(MIN_FIRE_DELAY_MS, START_FIRE_DELAY_MS - (this.level - 1) * FIRE_DELAY_STEP_MS));
+    this.activeOverlay = undefined;
+    this.overlayBackdrop = undefined;
+    this.fireTimer = Math.min(this.fireTimer, this.giftLauncherDelayMs());
     this.refreshHud();
   }
 
@@ -359,5 +409,7 @@ export class GameScene extends Phaser.Scene {
     }).setOrigin(0.5).setInteractive({ useHandCursor: true });
     restart.on('pointerdown', () => this.scene.restart());
     menu.add(restart);
+    this.activeOverlay = menu;
+    this.overlayBackdrop = menu.getAt(0) as Phaser.GameObjects.Rectangle;
   }
 }
